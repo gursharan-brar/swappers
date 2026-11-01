@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build output (CI builds and uploads this; never commit it)
+dist/
+*.zip
+butler/
+.vite/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Env and secrets (the itch API key lives in GitHub Secrets, never here)
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Art and audio tool scratch files (export finished assets into public/assets)
+*.kra~
+*.aseprite.bak
+*.blend1
+*.reapeaks
+*.asd

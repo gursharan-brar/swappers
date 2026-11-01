@@ -1,0 +1,87 @@
+name: Build and deploy
+
+# Every push and PR: typecheck, test, build, and attach the web build as a downloadable artifact.
+# Pushes to main: also upload the build to itch.io with butler (once itch is set up, see README).
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      allow_after_deadline:
+        description: 'Upload to itch even though the jam deadline has passed (critical fixes only, check the jam rules first)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-build
+          path: dist
+          retention-days: 14
+
+  itch:
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    env:
+      BUTLER_API_KEY: ${{ secrets.BUTLER_API_KEY }}
+      # Repo variable, e.g. "yourname/swappers" (itch username / project URL slug).
+      ITCH_TARGET: ${{ vars.ITCH_TARGET }}
+      # Game Off 2026 deadline: Dec 1 2026 13:37 PST = 21:37 UTC.
+      DEADLINE_UTC: '2026-12-01T21:37:00Z'
+      ALLOW_LATE: ${{ inputs.allow_after_deadline || 'false' }}
+    steps:
+      - name: Decide whether to upload
+        id: gate
+        run: |
+          if [ -z "$BUTLER_API_KEY" ] || [ -z "$ITCH_TARGET" ]; then
+            echo "::warning::Skipping itch upload. Add the BUTLER_API_KEY secret and the ITCH_TARGET variable (see README)."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          elif [ "$(date -u +%s)" -ge "$(date -u -d "$DEADLINE_UTC" +%s)" ] && [ "$ALLOW_LATE" != "true" ]; then
+            echo "::warning::Jam deadline has passed. Not overwriting the submitted build. Re-run manually with allow_after_deadline to override."
+            echo "upload=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        if: steps.gate.outputs.upload == 'true'
+        with:
+          name: web-build
+          path: dist
+
+      - name: Install butler
+        if: steps.gate.outputs.upload == 'true'
+        run: |
+          curl -fsSL -o butler.zip https://broth.itch.zone/butler/linux-amd64/LATEST/archive/default
+          unzip -q butler.zip -d "$RUNNER_TEMP/butler"
+          chmod +x "$RUNNER_TEMP/butler/butler"
+          "$RUNNER_TEMP/butler/butler" -V
+
+      - name: Push to itch.io
+        if: steps.gate.outputs.upload == 'true'
+        run: '"$RUNNER_TEMP/butler/butler" push dist "$ITCH_TARGET:html5" --userversion "${GITHUB_SHA::7}"'
