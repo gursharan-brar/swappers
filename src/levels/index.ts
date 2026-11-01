@@ -1,5 +1,17 @@
 import type { LevelDef } from '../core/level';
 import { level01 } from './level01';
+import { level02 } from './level02';
+import { level03 } from './level03';
+import { level04 } from './level04';
+import { level05 } from './level05';
+import { level06 } from './level06';
+import { level07 } from './level07';
+import { level08 } from './level08';
+import { level09 } from './level09';
+import { level10 } from './level10';
 
-/** Play order. Add new levels here; tests/levels.test.ts checks that every one parses. */
-export const LEVELS: readonly LevelDef[] = [level01];
+/**
+ * Play order. Add new levels here. tests/levels.test.ts runs a solver on every level to prove
+ * it can be beaten; tests/level-design.test.ts checks each one really needs Shift.
+ */
+export const LEVELS: readonly LevelDef[] = [level01, level02, level03, level04, level05, level06, level07, level08, level09, level10];

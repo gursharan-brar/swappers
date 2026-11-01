@@ -1,6 +1,6 @@
 import { CELL, SLOT_H, SLOT_W } from '../config';
 import { GLYPH_H, GLYPH_W, getGlyph } from './glyphs';
-import { BLOCK, LEVEL_COLS, LEVEL_ROWS, type ParsedLevel } from './level';
+import { BLOCK, LEVEL_COLS, LEVEL_ROWS, type ParsedLevel, type SlotPos } from './level';
 import { displayChar, isLetter, isShiftableSymbol, type ShiftState } from './shift';
 
 /** Axis-aligned box in world pixels. (0,0) is the top-left of the level, not the screen. */
@@ -24,7 +24,29 @@ export interface GlyphInstance {
   shown: string;
   /** True while this glyph wants to shift but the player is in the way. */
   jammed: boolean;
+  /** What this glyph shows in each of the 4 shift states, indexed by stateIndex(). */
+  readonly display: readonly [string, string, string, string];
 }
+
+/** Everything about the world that changes during play. Cheap to take and restore. */
+export interface WorldSnapshot {
+  readonly shown: readonly string[];
+  readonly jammed: readonly boolean[];
+  readonly owner: Int16Array;
+  readonly settledFor: number;
+}
+
+/** 0 = none, 1 = Shift, 2 = Caps Lock, 3 = both. */
+export function stateIndex(state: ShiftState): number {
+  return (state.shift ? 1 : 0) | (state.caps ? 2 : 0);
+}
+
+const ALL_STATES: readonly ShiftState[] = [
+  { shift: false, caps: false },
+  { shift: true, caps: false },
+  { shift: false, caps: true },
+  { shift: true, caps: true },
+];
 
 export interface ShiftRules {
   maxLift: number;
@@ -57,11 +79,17 @@ export class World {
   /** Bumped whenever what is drawn changes. Renderers redraw when it differs. */
   version = 0;
 
-  /** Glyph index owning each cell, or -1 for empty. */
-  private readonly owner: Int16Array;
+  /**
+   * Glyph index owning each cell, or -1 for empty. Never mutated after it is built:
+   * rebuild() makes a new array, so snapshots can share it safely.
+   */
+  private owner: Int16Array;
+  /** stateIndex() every glyph already matches with nothing jammed, or -1. Fast path. */
+  private settledFor = 0;
+  /** The snapshot the world currently equals, if nothing changed since; lets snapshot() reuse it. */
+  private cleanSnapshot: WorldSnapshot | undefined;
 
   constructor(level: ParsedLevel) {
-    this.owner = new Int16Array(this.cols * this.rows);
     this.glyphs = level.slots.map((s, index) => ({
       index,
       sx: s.sx,
@@ -70,8 +98,36 @@ export class World {
       kind: kindOf(s.char),
       shown: s.char,
       jammed: false,
+      display: ALL_STATES.map((st) => displayChar(s.char, st)) as unknown as [string, string, string, string],
     }));
-    this.rebuild();
+    this.owner = this.build();
+  }
+
+  snapshot(): WorldSnapshot {
+    if (this.cleanSnapshot) return this.cleanSnapshot;
+    this.cleanSnapshot = {
+      shown: this.glyphs.map((g) => g.shown),
+      jammed: this.glyphs.map((g) => g.jammed),
+      owner: this.owner,
+      settledFor: this.settledFor,
+    };
+    return this.cleanSnapshot;
+  }
+
+  /** Short string identifying the current glyph state (for de-duplicating solver states). */
+  stateKey(): string {
+    return this.settledFor >= 0 ? `s${this.settledFor}` : this.glyphs.map((g) => g.shown).join('');
+  }
+
+  restore(snap: WorldSnapshot): void {
+    this.glyphs.forEach((g, i) => {
+      g.shown = snap.shown[i] ?? g.base;
+      g.jammed = snap.jammed[i] ?? false;
+    });
+    this.owner = snap.owner;
+    this.settledFor = snap.settledFor;
+    this.cleanSnapshot = snap;
+    this.version++;
   }
 
   /** Glyph index at a cell, or -1. Outside the level: -1 (use isSolidCell for collision). */
@@ -88,7 +144,15 @@ export class World {
   }
 
   overlaps(box: Box): boolean {
-    const [cx0, cy0, cx1, cy1] = cellRange(box);
+    return this.overlapsRect(box.x, box.y, box.w, box.h);
+  }
+
+  /** Allocation-free overlap test; physics calls this thousands of times per frame in the solver. */
+  overlapsRect(x: number, y: number, w: number, h: number): boolean {
+    const cx0 = Math.floor(x / CELL);
+    const cy0 = Math.floor(y / CELL);
+    const cx1 = Math.floor((x + w - EPS) / CELL);
+    const cy1 = Math.floor((y + h - EPS) / CELL);
     for (let cy = cy0; cy <= cy1; cy++) {
       for (let cx = cx0; cx <= cx1; cx++) {
         if (this.isSolidCell(cx, cy)) return true;
@@ -108,12 +172,16 @@ export class World {
    */
   applyShift(state: ShiftState, player: Box, rules: ShiftRules): ShiftResult {
     const result: ShiftResult = { lift: 0, newlyJammed: [] };
+    const si = stateIndex(state);
+    if (this.settledFor === si) return result;
+    this.cleanSnapshot = undefined;
+
     const pending: GlyphInstance[] = [];
     let dirty = false;
 
     for (const g of this.glyphs) {
       if (g.kind === 'block' || g.kind === 'static') continue;
-      if (displayChar(g.base, state) !== g.shown) {
+      if (g.display[si] !== g.shown) {
         pending.push(g);
       } else if (g.jammed) {
         g.jammed = false; // the key was released before the glyph ever shifted
@@ -123,11 +191,12 @@ export class World {
 
     if (pending.length === 0) {
       if (dirty) this.version++;
+      this.settledFor = si;
       return result;
     }
 
     const previous = pending.map((g) => g.shown);
-    for (const g of pending) g.shown = displayChar(g.base, state);
+    for (const g of pending) g.shown = g.display[si] ?? g.base;
     this.rebuild();
 
     if (this.overlaps(player)) {
@@ -147,9 +216,12 @@ export class World {
       }
     }
 
+    let anyJammed = false;
     for (const g of pending) {
-      if (g.jammed && g.shown === displayChar(g.base, state)) g.jammed = false;
+      if (g.jammed && g.shown === g.display[si]) g.jammed = false;
+      if (g.jammed) anyJammed = true;
     }
+    this.settledFor = anyJammed ? -1 : si;
     this.version++;
     return result;
   }
@@ -198,23 +270,28 @@ export class World {
   }
 
   private rebuild(): void {
-    this.owner.fill(-1);
+    this.owner = this.build();
+  }
+
+  private build(): Int16Array {
+    const owner = new Int16Array(this.cols * this.rows).fill(-1);
     for (const g of this.glyphs) {
       const ox = g.sx * SLOT_W;
       const oy = g.sy * SLOT_H;
       if (g.kind === 'block') {
         for (let y = 0; y < SLOT_H; y++) {
-          for (let x = 0; x < SLOT_W; x++) this.owner[(oy + y) * this.cols + ox + x] = g.index;
+          for (let x = 0; x < SLOT_W; x++) owner[(oy + y) * this.cols + ox + x] = g.index;
         }
         continue;
       }
       const pattern = getGlyph(g.shown);
       for (let y = 0; y < GLYPH_H; y++) {
         for (let x = 0; x < GLYPH_W; x++) {
-          if (pattern[y]?.[x]) this.owner[(oy + y) * this.cols + ox + x] = g.index;
+          if (pattern[y]?.[x]) owner[(oy + y) * this.cols + ox + x] = g.index;
         }
       }
     }
+    return owner;
   }
 }
 
@@ -231,6 +308,18 @@ export function cellRange(box: Box): [number, number, number, number] {
 /** Pixel rect of a slot, in world coordinates. */
 export function slotRect(sx: number, sy: number): Box {
   return { x: sx * SLOT_W * CELL, y: sy * SLOT_H * CELL, w: SLOT_W * CELL, h: SLOT_H * CELL };
+}
+
+/** The exit counts when the player touches the lower part of its slot (the "door"). */
+export function exitBox(exit: SlotPos): Box {
+  const r = slotRect(exit.sx, exit.sy);
+  return { x: r.x + CELL, y: r.y + 2 * CELL, w: r.w - 2 * CELL, h: r.h - 2 * CELL };
+}
+
+/** Where the player appears: centred in the spawn slot, feet on the slot's bottom edge. */
+export function spawnPoint(spawn: SlotPos, playerW: number, playerH: number): { x: number; y: number } {
+  const r = slotRect(spawn.sx, spawn.sy);
+  return { x: r.x + (r.w - playerW) / 2, y: r.y + r.h - playerH };
 }
 
 export function boxesOverlap(a: Box, b: Box): boolean {

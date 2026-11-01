@@ -34,11 +34,37 @@ Then open http://localhost:5173. Before pushing, run:
 npm run check
 ```
 
-## Making levels
+## Levels
 
-Levels are text files in `src/levels/`. Copy `level01.ts`, edit the 20x9 map, register it in
-`src/levels/index.ts`, and run `npm run dev` to play it. See the comments in `level01.ts` and
-`src/core/level.ts` for the legend and rules.
+There are 10 levels. Each one adds one new idea on top of the previous ones:
+
+| # | Name | New idea |
+| --- | --- | --- |
+| 01 | NO means no | Shift shrinks capitals into lowercase you can hop |
+| 02 | Both ways | Lowercase grows when shifted, so you switch mid-climb |
+| 03 | Going up | A letter growing under you carries you up |
+| 04 | Shift 6 | The number row: `6` becomes a `^` door (Caps Lock can't open it) |
+| 05 | Jammed | Let go inside a door and it waits for you |
+| 06 | Low bar | Floating `-` / `_` bars that move when shifted |
+| 07 | CAPS LOCK | Caps Lock flips letters but leaves symbols alone |
+| 08 | Read the shapes | Ascenders (`l`, `h`) stay tall even in lowercase |
+| 09 | Stepping stones | Letters floating over a pit |
+| 10 | Final shift | Everything, on two floors |
+
+Finish a level and press **Enter** for the next one. To jump straight to a level while testing,
+add `?level=7` to the URL, e.g. http://localhost:5173/?level=7.
+
+### Making a level
+
+Levels are text files in `src/levels/`. Copy one, edit the 20x9 map, register it in
+`src/levels/index.ts`, and run `npm run dev` to play it. The legend and rules are in the comment
+at the top of `src/core/level.ts`.
+
+`npm test` runs a solver (`src/core/solver.ts`) on every level. It plays the real physics with
+every combination of moves, jumps and Shift, and fails the test if a level can't be beaten.
+`tests/level-design.test.ts` also checks that no level can be beaten without Shift, so a font or
+physics change can't quietly add a shortcut. Still play every level yourself: the solver finds
+pixel-perfect routes a human won't.
 
 ## Deploying to itch.io (one-time setup)
 

@@ -5,7 +5,7 @@ import { levelFrom, simulate } from './helpers';
 const FLOOR_TOP = 8 * SLOT_H * CELL; // top surface of the bottom row of blocks
 
 describe('jump tuning (the rule every level depends on)', () => {
-  it('apex is above lowercase x-height (40px) and below capital height (56px)', () => {
+  it('apex is above lowercase x-height (40px) and below the 48px shoulder of round capitals', () => {
     const sim = simulate(levelFrom(['☺        ⌂', '████████████████████']));
     sim.run(0.2);
     let apex = 0;
@@ -14,7 +14,7 @@ describe('jump tuning (the rule every level depends on)', () => {
       apex = Math.max(apex, FLOOR_TOP - (sim.player.y + sim.player.h));
     }
     expect(apex).toBeGreaterThan(40 + 4);
-    expect(apex).toBeLessThan(56 - 2);
+    expect(apex).toBeLessThan(48 - 1.5);
   });
 
   it('cannot cross "NO", can cross "no"', () => {

@@ -1,25 +1,35 @@
 import Phaser from 'phaser';
-import { CELL, COLORS, FIXED_DT, GAME_W, HUD_H, SHIFT_RULES, SLOT_H } from '../config';
+import { CELL, COLORS, FIXED_DT, GAME_W, HUD_H, PLAYER, SHIFT_RULES, SLOT_H } from '../config';
 import { LEVEL_ROWS, parseLevel, type ParsedLevel } from '../core/level';
 import { createPlayer, stepPlayer, type Player } from '../core/physics';
-import { World, boxesOverlap, slotRect, type Box } from '../core/world';
+import { World, boxesOverlap, exitBox, spawnPoint } from '../core/world';
 import { LEVELS } from '../levels';
 import { ModifierKeys } from './ModifierKeys';
 
 type Status = 'playing' | 'cleared';
+
+/** `?level=7` in the URL starts at level 7. Handy for playtesting one level. */
+function levelFromUrl(): number {
+  const n = Number(new URLSearchParams(window.location.search).get('level'));
+  return Number.isInteger(n) && n >= 1 && n <= LEVELS.length ? n - 1 : 0;
+}
 
 /**
  * Grey-box scene: draws the glyph grid as flat rectangles. All game rules live in src/core;
  * this file only wires input -> core -> pixels. Keep it that way so rules stay testable.
  */
 export class GameScene extends Phaser.Scene {
+  private levelIndex = 0;
   private level!: ParsedLevel;
   private world!: World;
   private player!: Player;
   private mods!: ModifierKeys;
   private status: Status = 'playing';
 
-  private keys!: Record<'left' | 'right' | 'a' | 'd' | 'up' | 'w' | 'space' | 'r', Phaser.Input.Keyboard.Key>;
+  private keys!: Record<
+    'left' | 'right' | 'a' | 'd' | 'up' | 'w' | 'space' | 'r' | 'enter',
+    Phaser.Input.Keyboard.Key
+  >;
   private jumpQueued = false;
   private accumulator = 0;
   private drawnVersion = -1;
@@ -35,9 +45,16 @@ export class GameScene extends Phaser.Scene {
     super('game');
   }
 
+  init(data: { index?: number }): void {
+    this.levelIndex = data.index ?? levelFromUrl();
+    this.accumulator = 0;
+    this.drawnVersion = -1;
+    this.jumpQueued = false;
+  }
+
   create(): void {
-    const def = LEVELS[0];
-    if (!def) throw new Error('No levels defined');
+    const def = LEVELS[this.levelIndex];
+    if (!def) throw new Error(`No level at index ${this.levelIndex}`);
     this.level = parseLevel(def);
     this.world = new World(this.level);
     this.player = this.spawnPlayer();
@@ -59,11 +76,16 @@ export class GameScene extends Phaser.Scene {
       w: kb.addKey(K.W),
       space: kb.addKey(K.SPACE),
       r: kb.addKey(K.R),
+      enter: kb.addKey(K.ENTER),
     };
     for (const key of [this.keys.up, this.keys.w, this.keys.space]) {
       key.on('down', () => (this.jumpQueued = true));
     }
-    this.keys.r.on('down', () => this.restart());
+    this.keys.r.on('down', () => this.goToLevel(this.levelIndex));
+    this.keys.enter.on('down', () => {
+      if (this.status !== 'cleared') return;
+      this.goToLevel((this.levelIndex + 1) % LEVELS.length);
+    });
 
     // World space starts below the HUD strip.
     this.cameras.main.setScroll(0, -HUD_H);
@@ -111,35 +133,28 @@ export class GameScene extends Phaser.Scene {
       this.respawn();
       return;
     }
-    if (boxesOverlap(this.player, this.exitBox())) {
+    if (boxesOverlap(this.player, exitBox(this.level.exit))) {
       this.status = 'cleared';
-      this.banner.setText('CLEAR\n\npress R to replay').setVisible(true);
+      const last = this.levelIndex === LEVELS.length - 1;
+      this.banner
+        .setText(last ? 'YOU BEAT SWAPPERS\n\nEnter: play again' : 'CLEAR\n\nEnter: next level   R: replay')
+        .setVisible(true);
     }
   }
 
   private spawnPlayer(): Player {
-    const r = slotRect(this.level.spawn.sx, this.level.spawn.sy);
-    const p = createPlayer(0, 0);
-    p.x = r.x + (r.w - p.w) / 2;
-    p.y = r.y + r.h - p.h;
-    return p;
+    const at = spawnPoint(this.level.spawn, PLAYER.w, PLAYER.h);
+    return createPlayer(at.x, at.y);
+  }
+
+  /** Restart this scene on a level; also how R resets the current one (fresh world). */
+  private goToLevel(index: number): void {
+    this.scene.restart({ index });
   }
 
   private respawn(): void {
     this.player = this.spawnPlayer();
     this.cameras.main.flash(120, 255, 90, 90);
-  }
-
-  private restart(): void {
-    this.status = 'playing';
-    this.banner.setVisible(false);
-    this.player = this.spawnPlayer();
-  }
-
-  /** The exit counts when the player touches the lower part of its slot (the "door"). */
-  private exitBox(): Box {
-    const r = slotRect(this.level.exit.sx, this.level.exit.sy);
-    return { x: r.x + CELL, y: r.y + 2 * CELL, w: r.w - 2 * CELL, h: r.h - 2 * CELL };
   }
 
   private render(): void {
@@ -160,7 +175,7 @@ export class GameScene extends Phaser.Scene {
     const g = this.worldGfx;
     g.clear();
 
-    const exit = this.exitBox();
+    const exit = exitBox(this.level.exit);
     g.lineStyle(2, COLORS.exit, 1);
     g.strokeRect(exit.x, exit.y, exit.w, exit.h);
 
@@ -195,12 +210,13 @@ export class GameScene extends Phaser.Scene {
     hud.setDepth(10);
     const style = { fontFamily: 'monospace', fontSize: '14px', color: '#c9cbd3' };
     this.add
-      .text(12, 10, `${this.level.id}  ${this.level.name}`, style)
+      .text(12, 10, `${this.level.id}/${String(LEVELS.length).padStart(2, '0')}  ${this.level.name}`, style)
       .setScrollFactor(0)
       .setDepth(11);
     this.add
-      .text(GAME_W / 2, 10, '←→/AD move · ↑/W/Space jump · hold Shift (X) · Caps Lock (C) · R restart', {
+      .text(GAME_W / 2 + 40, 11, '←→ move · ↑/Space jump · hold Shift (X) · Caps Lock (C) · R restart', {
         ...style,
+        fontSize: '12px',
         color: '#8a8f9e',
       })
       .setOrigin(0.5, 0)

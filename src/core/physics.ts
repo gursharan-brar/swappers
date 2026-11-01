@@ -5,7 +5,7 @@ export type PhysicsTuning = typeof PHYSICS;
 
 /** Anything the player can collide with. World implements this. */
 export interface Collider {
-  overlaps(box: Box): boolean;
+  overlapsRect(x: number, y: number, w: number, h: number): boolean;
 }
 
 export interface Player extends Box {
@@ -90,13 +90,13 @@ export function stepPlayer(
 function moveX(p: Player, dx: number, world: Collider, stepUp: number): void {
   if (dx === 0) return;
   const nx = p.x + dx;
-  if (!world.overlaps({ x: nx, y: p.y, w: p.w, h: p.h })) {
+  if (!world.overlapsRect(nx, p.y, p.w, p.h)) {
     p.x = nx;
     return;
   }
   if (p.grounded) {
     for (let s = 1; s <= stepUp; s++) {
-      if (!world.overlaps({ x: nx, y: p.y - s, w: p.w, h: p.h })) {
+      if (!world.overlapsRect(nx, p.y - s, p.w, p.h)) {
         p.x = nx;
         p.y -= s;
         return;
@@ -116,7 +116,7 @@ function moveX(p: Player, dx: number, world: Collider, stepUp: number): void {
 
 function moveY(p: Player, dy: number, world: Collider): void {
   const ny = p.y + dy;
-  if (!world.overlaps({ x: p.x, y: ny, w: p.w, h: p.h })) {
+  if (!world.overlapsRect(p.x, ny, p.w, p.h)) {
     p.y = ny;
     p.grounded = false;
     return;

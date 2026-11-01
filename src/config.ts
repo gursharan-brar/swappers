@@ -3,8 +3,9 @@
  *
  * The jump numbers are NOT free to change. tests/physics.test.ts enforces the
  * invariant the whole game depends on:
- *     lowercase x-height (40px) < jump apex < capital height (56px)
- * i.e. you can hop onto "no" but not over "NO".
+ *     lowercase x-height (40px) < jump apex < 48px
+ * i.e. you can hop onto "no" but not over "NO". 48, not 56: round capitals like O and C
+ * have a shoulder one cell below the top, and reaching it lets you climb over them.
  */
 
 /** One font pixel, in screen pixels. */
@@ -28,7 +29,7 @@ export const PLAYER = {
 
 export const PHYSICS = {
   gravity: 1400, // px/s^2
-  jumpVelocity: 375, // px/s, apex ~50px
+  jumpVelocity: 362, // px/s, apex ~45px: above x-height (40), below the 48px shoulder of round capitals
   runSpeed: 130, // px/s
   groundAccel: 1600,
   airAccel: 1100,
