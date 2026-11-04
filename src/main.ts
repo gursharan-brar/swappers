@@ -8,7 +8,7 @@ new Phaser.Game({
   width: GAME_W,
   height: GAME_H,
   backgroundColor: COLORS.background,
-  pixelArt: true,
+  antialias: true,
   banner: false,
   disableContextMenu: true,
   scale: {

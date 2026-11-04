@@ -1,70 +1,60 @@
-# Swappers
+# Prepay Only (working title)
 
-A puzzle-platformer made of text, for [GitHub Game Off 2026](https://itch.io/jam/game-off-2026) (theme: **SHIFT**).
+A gas-bar comedy for [GitHub Game Off 2026](https://itch.io/jam/game-off-2026) (theme: **SHIFT**).
 
-The level is made of letters, and their pixels are solid. Hold **Shift** and `NO` becomes `no`,
-low enough to hop over. `6` becomes `^`, a door you can walk under. Caps Lock flips letters but not
-numbers, just like your keyboard.
+One shift at a Calgary gas bar, squeezed into 90 seconds of 5-second microgames. Do what the
+screen says, fast. When the clock hits zero your coworker walks in for SHIFT CHANGE and grades
+the state of the store: ANGEL, ACCEPTABLE or MONSTER. Mess up three times and you're sent home early.
+
+This is a grey-box prototype: coloured shapes and synthesized beeps, built to answer one
+question. Is it fun?
 
 ## Play
 
-| Action | Keys |
+Mouse only (number keys also work for AUTHORIZE). **M** mutes.
+
+| Microgame | What you do |
 | --- | --- |
-| Move | ← → or A D |
-| Jump | ↑, W or Space |
-| Shift (hold) | Shift, or X |
-| Caps Lock (toggle) | Caps Lock, or C |
-| Restart | R |
+| AUTHORIZE! | A customer says "Forty on six!". Click pump 6. |
+| BOOST! | It's -30. Drag the red clamp onto the + terminal (not the -). |
+| RE-LETTER! | The price changed. Drag the missing digit onto the sign. |
+| MOP! | Rub the mouse over the spills until the floor is clean. |
+
+Microgames get faster every 3 wins. There are 3 lives, shown as coffee cups.
 
 ## Run it locally
 
-Needs Node 22+.
+Needs Node 22+ and Git.
 
 ```bash
-npm install
+npm ci
 ```
 
 ```bash
 npm run dev
 ```
 
-Then open http://localhost:5173. Before pushing, run:
+Then open http://localhost:5173 and click to clock in. Before pushing, run:
 
 ```bash
 npm run check
 ```
 
-## Levels
+## Adding a microgame
 
-There are 10 levels. Each one adds one new idea on top of the previous ones:
+Each microgame is one file in `src/game/microgames/`. To add one:
 
-| # | Name | New idea |
-| --- | --- | --- |
-| 01 | NO means no | Shift shrinks capitals into lowercase you can hop |
-| 02 | Both ways | Lowercase grows when shifted, so you switch mid-climb |
-| 03 | Going up | A letter growing under you carries you up |
-| 04 | Shift 6 | The number row: `6` becomes a `^` door (Caps Lock can't open it) |
-| 05 | Jammed | Let go inside a door and it waits for you |
-| 06 | Low bar | Floating `-` / `_` bars that move when shifted |
-| 07 | CAPS LOCK | Caps Lock flips letters but leaves symbols alone |
-| 08 | Read the shapes | Ascenders (`l`, `h`) stay tall even in lowercase |
-| 09 | Stepping stones | Letters floating over a pit |
-| 10 | Final shift | Everything, on two floors |
+1. Copy a similar one (`authorize.ts` for clicking, `boost.ts` or `reletter.ts` for dragging,
+   `mop.ts` for rubbing).
+2. Give it a new `id`, a one-word `instruction` ending in `!`, and a short `hint`.
+3. Add it to the list in `src/game/microgames/index.ts`.
+4. Play only yours on repeat: http://localhost:5173/?only=yourid
 
-Finish a level and press **Enter** for the next one. To jump straight to a level while testing,
-add `?level=7` to the URL, e.g. http://localhost:5173/?level=7.
+Rules of thumb: a player must understand it within one second of the word appearing, it must
+be winnable in about 2.5 seconds once things speed up, and it should be about doing, not
+thinking. Real details from the job make the best ones.
 
-### Making a level
-
-Levels are text files in `src/levels/`. Copy one, edit the 20x9 map, register it in
-`src/levels/index.ts`, and run `npm run dev` to play it. The legend and rules are in the comment
-at the top of `src/core/level.ts`.
-
-`npm test` runs a solver (`src/core/solver.ts`) on every level. It plays the real physics with
-every combination of moves, jumps and Shift, and fails the test if a level can't be beaten.
-`tests/level-design.test.ts` also checks that no level can be beaten without Shift, so a font or
-physics change can't quietly add a shortcut. Still play every level yourself: the solver finds
-pixel-perfect routes a human won't.
+Tunables (shift length, lives, speed-up, grade thresholds, coworker's name) live in `src/config.ts`.
 
 ## Deploying to itch.io (one-time setup)
 

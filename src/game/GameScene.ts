@@ -1,253 +1,362 @@
 import Phaser from 'phaser';
-import { CELL, COLORS, FIXED_DT, GAME_W, HUD_H, PLAYER, SHIFT_RULES, SLOT_H } from '../config';
-import { LEVEL_ROWS, parseLevel, type ParsedLevel } from '../core/level';
-import { createPlayer, stepPlayer, type Player } from '../core/physics';
-import { World, boxesOverlap, exitBox, spawnPoint } from '../core/world';
-import { LEVELS } from '../levels';
-import { ModifierKeys } from './ModifierKeys';
+import { COLORS, COWORKER, FOOTER_H, GAME_H, GAME_W, HUD_H, RUN } from '../config';
+import { Run, pickNext, type Grade } from '../core/run';
+import { MICROGAMES } from './microgames';
+import type { Area, Microgame, MicrogameContext, MicrogameInstance } from './microgames/types';
+import { Sfx } from './sfx';
 
-type Status = 'playing' | 'cleared';
+type Phase = 'title' | 'intro' | 'micro' | 'result' | 'over';
 
-/** `?level=7` in the URL starts at level 7. Handy for playtesting one level. */
-function levelFromUrl(): number {
-  const n = Number(new URLSearchParams(window.location.search).get('level'));
-  return Number.isInteger(n) && n >= 1 && n <= LEVELS.length ? n - 1 : 0;
+const BIG = 'Arial Black, Arial, sans-serif';
+const MONO = 'monospace';
+
+const GRADE_LINES: Record<Grade, { title: string; line: string; color: number }> = {
+  angel: { title: 'ANGEL', line: `"Wait... you actually did everything?"`, color: COLORS.good },
+  acceptable: { title: 'ACCEPTABLE', line: `"Eh. I've walked into worse."`, color: COLORS.warn },
+  monster: { title: 'MONSTER', line: `"What happened in here?!"`, color: COLORS.bad },
+};
+
+/** `?only=mop` plays one microgame on repeat. For testing a new microgame. */
+function onlyFromUrl(): string | undefined {
+  const id = new URLSearchParams(window.location.search).get('only') ?? undefined;
+  return id && MICROGAMES.some((m) => m.id === id) ? id : undefined;
 }
 
 /**
- * Grey-box scene: draws the glyph grid as flat rectangles. All game rules live in src/core;
- * this file only wires input -> core -> pixels. Keep it that way so rules stay testable.
+ * The whole prototype in one scene: title -> (intro -> microgame -> result)* -> shift change.
+ * Rules live in src/core/run.ts; each microgame lives in src/game/microgames/.
  */
 export class GameScene extends Phaser.Scene {
-  private levelIndex = 0;
-  private level!: ParsedLevel;
-  private world!: World;
-  private player!: Player;
-  private mods!: ModifierKeys;
-  private status: Status = 'playing';
+  private readonly sfx = new Sfx();
+  private readonly only = onlyFromUrl();
+  private phase: Phase = 'title';
+  private phaseLeft = 0;
+  private run = new Run();
+  private previousId: string | undefined;
 
-  private keys!: Record<
-    'left' | 'right' | 'a' | 'd' | 'up' | 'w' | 'space' | 'r' | 'enter',
-    Phaser.Input.Keyboard.Key
-  >;
-  private jumpQueued = false;
-  private accumulator = 0;
-  private drawnVersion = -1;
+  private current: Microgame | undefined;
+  private instance: MicrogameInstance | undefined;
+  private microTotal = 0;
+  private microLeft = 0;
+  private lastTickSecond = -1;
+  private resolved = false;
+  private cleanup: (() => void)[] = [];
 
-  private worldGfx!: Phaser.GameObjects.Graphics;
-  private playerRect!: Phaser.GameObjects.Rectangle;
-  private shiftLabel!: Phaser.GameObjects.Text;
-  private capsLabel!: Phaser.GameObjects.Text;
-  private banner!: Phaser.GameObjects.Text;
-  private focusHint!: Phaser.GameObjects.Text;
+  private titleLayer: Phaser.GameObjects.GameObject[] = [];
+  private overLayer: Phaser.GameObjects.GameObject[] = [];
+
+  private clockText!: Phaser.GameObjects.Text;
+  private servedText!: Phaser.GameObjects.Text;
+  private cups: Phaser.GameObjects.Rectangle[] = [];
+  private coworker!: Phaser.GameObjects.Container;
+  private hudLayer: Phaser.GameObjects.GameObject[] = [];
+  private instruction!: Phaser.GameObjects.Text;
+  private hint!: Phaser.GameObjects.Text;
+  private timerBar!: Phaser.GameObjects.Rectangle;
+  private stamp!: Phaser.GameObjects.Text;
 
   constructor() {
     super('game');
   }
 
-  init(data: { index?: number }): void {
-    this.levelIndex = data.index ?? levelFromUrl();
-    this.accumulator = 0;
-    this.drawnVersion = -1;
-    this.jumpQueued = false;
-  }
-
   create(): void {
-    const def = LEVELS[this.levelIndex];
-    if (!def) throw new Error(`No level at index ${this.levelIndex}`);
-    this.level = parseLevel(def);
-    this.world = new World(this.level);
-    this.player = this.spawnPlayer();
-    this.status = 'playing';
-
-    this.mods = new ModifierKeys(window);
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.mods.destroy());
-
-    const kb = this.input.keyboard;
-    if (!kb) throw new Error('Keyboard input unavailable');
-    const K = Phaser.Input.Keyboard.KeyCodes;
-    // addKey captures the key, which stops arrows and Space from scrolling the itch.io page.
-    this.keys = {
-      left: kb.addKey(K.LEFT),
-      right: kb.addKey(K.RIGHT),
-      a: kb.addKey(K.A),
-      d: kb.addKey(K.D),
-      up: kb.addKey(K.UP),
-      w: kb.addKey(K.W),
-      space: kb.addKey(K.SPACE),
-      r: kb.addKey(K.R),
-      enter: kb.addKey(K.ENTER),
-    };
-    for (const key of [this.keys.up, this.keys.w, this.keys.space]) {
-      key.on('down', () => (this.jumpQueued = true));
-    }
-    this.keys.r.on('down', () => this.goToLevel(this.levelIndex));
-    this.keys.enter.on('down', () => {
-      if (this.status !== 'cleared') return;
-      this.goToLevel((this.levelIndex + 1) % LEVELS.length);
-    });
-
-    // World space starts below the HUD strip.
-    this.cameras.main.setScroll(0, -HUD_H);
-    this.worldGfx = this.add.graphics();
-    this.playerRect = this.add.rectangle(0, 0, this.player.w, this.player.h, COLORS.player).setOrigin(0, 0);
     this.buildHud();
+    this.showTitle();
+
+    this.input.keyboard?.on('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'm' || e.key === 'M') this.sfx.toggleMute();
+    });
+    this.input.on('pointerdown', () => {
+      if (this.phase === 'title') this.startShift();
+      else if (this.phase === 'over' && this.phaseLeft <= 0) this.startShift();
+    });
 
     if (import.meta.env.DEV) {
       // Handle for scripted playtests in the browser console or Playwright. Stripped from builds.
-      (window as unknown as { __swappers: GameScene }).__swappers = this;
+      (window as unknown as { __prepay: GameScene }).__prepay = this;
     }
   }
 
   override update(_time: number, deltaMs: number): void {
-    // Clamp so a background tab doesn't simulate seconds of physics in one frame.
-    this.accumulator += Math.min(deltaMs / 1000, 0.1);
-    while (this.accumulator >= FIXED_DT) {
-      this.fixedStep();
-      this.accumulator -= FIXED_DT;
+    const dt = Math.min(deltaMs / 1000, 0.1);
+    this.phaseLeft -= dt;
+
+    if (this.phase === 'intro' || this.phase === 'micro' || this.phase === 'result') {
+      this.run.tick(dt);
+      this.sfx.pumpBeat(this.run.tempo);
+      this.updateHud();
     }
-    this.render();
+
+    switch (this.phase) {
+      case 'intro':
+        if (this.phaseLeft <= 0) this.beginMicrogame();
+        break;
+      case 'micro':
+        this.updateMicrogame(dt);
+        break;
+      case 'result':
+        if (this.phaseLeft <= 0) {
+          this.endMicrogame();
+          this.nextMicrogame();
+        }
+        break;
+      default:
+        break;
+    }
   }
 
-  private fixedStep(): void {
-    const jumpPressed = this.jumpQueued;
-    this.jumpQueued = false;
-    if (this.status !== 'playing') return;
+  // ---------- Flow ----------
 
-    const shift = this.world.applyShift(this.mods.state, this.player, SHIFT_RULES);
-    if (shift.newlyJammed.length > 0) this.cameras.main.shake(70, 0.004);
+  private startShift(): void {
+    this.sfx.unlock();
+    this.sfx.clockIn();
+    this.sfx.stopBeat();
+    this.destroyAll(this.titleLayer);
+    this.destroyAll(this.overLayer);
+    this.run = new Run();
+    this.previousId = undefined;
+    this.setHudVisible(true);
+    this.updateHud();
+    this.nextMicrogame();
+  }
 
-    stepPlayer(
-      this.player,
-      {
-        left: this.keys.left.isDown || this.keys.a.isDown,
-        right: this.keys.right.isDown || this.keys.d.isDown,
-        jumpHeld: this.keys.up.isDown || this.keys.w.isDown || this.keys.space.isDown,
-        jumpPressed,
-      },
-      this.world,
-      FIXED_DT,
-    );
-
-    if (this.player.y > this.world.heightPx + 32) {
-      this.respawn();
+  private nextMicrogame(): void {
+    if (this.run.over) {
+      this.endShift();
       return;
     }
-    if (boxesOverlap(this.player, exitBox(this.level.exit))) {
-      this.status = 'cleared';
-      const last = this.levelIndex === LEVELS.length - 1;
-      this.banner
-        .setText(last ? 'YOU BEAT SWAPPERS\n\nEnter: play again' : 'CLEAR\n\nEnter: next level   R: replay')
-        .setVisible(true);
-    }
+    const id = this.only ?? pickNext(MICROGAMES.map((m) => m.id), this.previousId, Math.random);
+    this.previousId = id;
+    this.current = MICROGAMES.find((m) => m.id === id);
+    if (!this.current) throw new Error(`Unknown microgame ${id}`);
+
+    this.phase = 'intro';
+    this.phaseLeft = RUN.introSeconds;
+    this.timerBar.setVisible(false);
+    this.stamp.setVisible(false);
+    this.instruction
+      .setText(this.current.instruction)
+      .setFontSize(110)
+      .setPosition(GAME_W / 2, GAME_H / 2 - 10)
+      .setScale(0.2)
+      .setAlpha(1)
+      .setVisible(true);
+    this.hint.setText(this.current.hint).setPosition(GAME_W / 2, GAME_H / 2 + 70).setVisible(true);
+    this.tweens.add({ targets: this.instruction, scale: 1, duration: 220, ease: 'Back.Out' });
+    this.sfx.tick();
   }
 
-  private spawnPlayer(): Player {
-    const at = spawnPoint(this.level.spawn, PLAYER.w, PLAYER.h);
-    return createPlayer(at.x, at.y);
-  }
+  private beginMicrogame(): void {
+    const micro = this.current;
+    if (!micro) return;
+    this.phase = 'micro';
+    this.resolved = false;
+    this.microTotal = this.run.microSeconds;
+    this.microLeft = this.microTotal;
+    this.lastTickSecond = -1;
 
-  /** Restart this scene on a level; also how R resets the current one (fresh world). */
-  private goToLevel(index: number): void {
-    this.scene.restart({ index });
-  }
+    // Instruction shrinks into the top of the play area so it stays readable.
+    this.instruction.setFontSize(34).setScale(1).setPosition(GAME_W / 2, HUD_H + 24).setAlpha(0.85);
+    this.hint.setVisible(false);
+    this.timerBar.setVisible(true).setFillStyle(COLORS.good);
 
-  private respawn(): void {
-    this.player = this.spawnPlayer();
-    this.cameras.main.flash(120, 255, 90, 90);
-  }
-
-  private render(): void {
-    if (this.world.version !== this.drawnVersion) {
-      this.drawWorld();
-      this.drawnVersion = this.world.version;
-    }
-    this.playerRect.setPosition(Math.round(this.player.x), Math.round(this.player.y));
-    this.playerRect.setSize(this.player.w, this.player.h);
-
-    const s = this.mods.state;
-    this.shiftLabel.setColor(s.shift ? '#f2b84b' : '#5c6273');
-    this.capsLabel.setColor(s.caps ? '#f2b84b' : '#5c6273');
-    this.focusHint.setVisible(!document.hasFocus());
-  }
-
-  private drawWorld(): void {
-    const g = this.worldGfx;
-    g.clear();
-
-    const exit = exitBox(this.level.exit);
-    g.lineStyle(2, COLORS.exit, 1);
-    g.strokeRect(exit.x, exit.y, exit.w, exit.h);
-
-    const colorOf = (index: number): number => {
-      const glyph = this.world.glyphs[index];
-      if (!glyph || glyph.kind === 'block') return COLORS.block;
-      if (glyph.jammed) return COLORS.glyphJammed;
-      return glyph.shown === glyph.base ? COLORS.glyph : COLORS.glyphFlipped;
+    const area: Area = { x: 0, y: HUD_H, w: GAME_W, h: GAME_H - HUD_H - FOOTER_H };
+    const owned: Phaser.GameObjects.GameObject[] = [];
+    const ctx: MicrogameContext = {
+      scene: this,
+      area,
+      tier: this.run.tier,
+      sfx: this.sfx,
+      random: Math.random,
+      add: (obj) => {
+        owned.push(obj);
+        return obj;
+      },
+      on: (event, fn) => {
+        this.input.on(event, fn);
+        this.cleanup.push(() => this.input.off(event, fn));
+      },
+      onKey: (fn) => {
+        const handler = (e: KeyboardEvent) => fn(e.key);
+        this.input.keyboard?.on('keydown', handler);
+        this.cleanup.push(() => this.input.keyboard?.off('keydown', handler));
+      },
+      win: () => this.resolve('win'),
+      lose: () => this.resolve('lose'),
     };
-
-    // Merge horizontal runs of same-coloured cells into one rect each.
-    for (let cy = 0; cy < this.world.rows; cy++) {
-      let runStart = -1;
-      let runColor = -1;
-      for (let cx = 0; cx <= this.world.cols; cx++) {
-        const owner = cx < this.world.cols ? this.world.ownerAt(cx, cy) : -1;
-        const color = owner >= 0 ? colorOf(owner) : -1;
-        if (color !== runColor) {
-          if (runColor >= 0) {
-            g.fillStyle(runColor, 1);
-            g.fillRect(runStart * CELL, cy * CELL, (cx - runStart) * CELL, CELL);
-          }
-          runStart = cx;
-          runColor = color;
-        }
+    this.cleanup.push(() => {
+      for (const obj of owned) {
+        this.tweens.killTweensOf(obj);
+        obj.destroy();
       }
+    });
+    this.instance = micro.start(ctx);
+    // Keep the instruction above whatever the microgame drew.
+    this.children.bringToTop(this.instruction);
+  }
+
+  private updateMicrogame(dt: number): void {
+    this.instance?.update?.(dt);
+    if (this.phase !== 'micro') return; // the microgame resolved itself this frame
+    this.microLeft -= dt;
+    const fraction = Math.max(0, this.microLeft / this.microTotal);
+    this.timerBar.setSize((GAME_W - 40) * fraction, 14);
+    if (fraction < 0.35) this.timerBar.setFillStyle(COLORS.bad);
+    else if (fraction < 0.6) this.timerBar.setFillStyle(COLORS.warn);
+
+    const second = Math.ceil(this.microLeft);
+    if (second <= 2 && second !== this.lastTickSecond) {
+      this.lastTickSecond = second;
+      this.sfx.tick();
+    }
+    if (this.microLeft <= 0) this.resolve(this.instance?.timeUp?.() ?? 'lose');
+  }
+
+  private resolve(result: 'win' | 'lose'): void {
+    if (this.phase !== 'micro' || this.resolved) return;
+    this.resolved = true;
+    this.phase = 'result';
+    this.phaseLeft = RUN.resultSeconds;
+
+    if (result === 'win') {
+      this.run.win();
+      this.sfx.win();
+      this.showStamp('NICE', COLORS.good);
+    } else {
+      this.run.lose();
+      this.sfx.lose();
+      this.cameras.main.shake(180, 0.008);
+      this.cameras.main.flash(120, 255, 60, 60);
+      this.showStamp('NOPE', COLORS.bad);
+    }
+    this.updateHud();
+  }
+
+  private endMicrogame(): void {
+    for (const fn of this.cleanup.splice(0)) fn();
+    this.instance = undefined;
+    this.current = undefined;
+  }
+
+  private endShift(): void {
+    this.phase = 'over';
+    this.phaseLeft = 1; // ignore clicks for a moment so a stray click doesn't restart
+    this.sfx.stopBeat();
+    this.sfx.handoff();
+    this.instruction.setVisible(false);
+    this.hint.setVisible(false);
+    this.timerBar.setVisible(false);
+    this.stamp.setVisible(false);
+    this.coworker.setX(70);
+
+    const grade = this.run.grade();
+    const g = GRADE_LINES[grade];
+    const cx = GAME_W / 2;
+    const heading = this.run.sentHome ? 'SENT HOME EARLY' : 'SHIFT CHANGE!';
+    const sub = this.run.sentHome
+      ? `The manager called ${COWORKER} in early. He looks around...`
+      : `${COWORKER} clocks in. He looks around the store...`;
+    this.overLayer.push(
+      this.add.rectangle(cx, GAME_H / 2 + 30, 760, 380, COLORS.hud, 0.95).setStrokeStyle(4, g.color),
+      this.add.text(cx, 150, heading, { fontFamily: BIG, fontSize: '54px', color: COLORS.text }).setOrigin(0.5),
+      this.add.text(cx, 210, sub, { fontFamily: MONO, fontSize: '18px', color: COLORS.dim }).setOrigin(0.5),
+      this.add.text(cx, 265, g.line, { fontFamily: BIG, fontSize: '28px', color: COLORS.text }).setOrigin(0.5),
+      this.add.text(cx, 335, g.title, { fontFamily: BIG, fontSize: '64px', color: hex(g.color) }).setOrigin(0.5).setAngle(-4),
+      this.add
+        .text(cx, 410, `served ${this.run.wins}   ·   messed up ${this.run.losses}`, { fontFamily: MONO, fontSize: '20px', color: COLORS.text })
+        .setOrigin(0.5),
+      this.add.text(cx, 470, 'click to clock in again', { fontFamily: MONO, fontSize: '18px', color: COLORS.dim }).setOrigin(0.5),
+    );
+  }
+
+  // ---------- Drawing ----------
+
+  private showTitle(): void {
+    this.setHudVisible(false);
+    const cx = GAME_W / 2;
+    this.titleLayer.push(
+      this.add.text(cx, 150, 'PREPAY ONLY', { fontFamily: BIG, fontSize: '84px', color: COLORS.text }).setOrigin(0.5),
+      this.add
+        .text(cx, 225, 'One gas-bar shift. 90 seconds until SHIFT CHANGE.', { fontFamily: MONO, fontSize: '20px', color: COLORS.dim })
+        .setOrigin(0.5),
+      this.add.rectangle(cx, 340, 340, 90, COLORS.panel).setStrokeStyle(4, COLORS.warn),
+      this.add.text(cx, 340, 'CLICK TO CLOCK IN', { fontFamily: BIG, fontSize: '30px', color: hex(COLORS.warn) }).setOrigin(0.5),
+      this.add
+        .text(cx, 440, 'Do what the screen says. Fast. Mouse only (number keys work too).  M = mute', {
+          fontFamily: MONO,
+          fontSize: '16px',
+          color: COLORS.dim,
+        })
+        .setOrigin(0.5),
+    );
+    if (this.only) {
+      this.titleLayer.push(
+        this.add.text(cx, 490, `testing one microgame: ${this.only}`, { fontFamily: MONO, fontSize: '16px', color: hex(COLORS.accent) }).setOrigin(0.5),
+      );
     }
   }
 
   private buildHud(): void {
-    const hud = this.add.rectangle(0, 0, GAME_W, HUD_H, COLORS.hud).setOrigin(0, 0).setScrollFactor(0);
-    hud.setDepth(10);
-    const style = { fontFamily: 'monospace', fontSize: '14px', color: '#c9cbd3' };
-    this.add
-      .text(12, 10, `${this.level.id}/${String(LEVELS.length).padStart(2, '0')}  ${this.level.name}`, style)
-      .setScrollFactor(0)
-      .setDepth(11);
-    this.add
-      .text(GAME_W / 2 + 40, 11, '←→ move · ↑/Space jump · hold Shift (X) · Caps Lock (C) · R restart', {
-        ...style,
-        fontSize: '12px',
-        color: '#8a8f9e',
-      })
-      .setOrigin(0.5, 0)
-      .setScrollFactor(0)
-      .setDepth(11);
-    this.shiftLabel = this.add
-      .text(GAME_W - 132, 10, 'SHIFT', { ...style, fontStyle: 'bold' })
-      .setScrollFactor(0)
-      .setDepth(11);
-    this.capsLabel = this.add
-      .text(GAME_W - 72, 10, 'CAPS', { ...style, fontStyle: 'bold' })
-      .setScrollFactor(0)
-      .setDepth(11);
+    this.hudLayer.push(this.add.rectangle(0, 0, GAME_W, HUD_H, COLORS.hud).setOrigin(0, 0));
+    this.clockText = this.add.text(20, 12, '', { fontFamily: BIG, fontSize: '28px', color: COLORS.text });
+    this.servedText = this.add.text(GAME_W - 20, 16, '', { fontFamily: MONO, fontSize: '20px', color: COLORS.text }).setOrigin(1, 0);
+    this.hudLayer.push(this.clockText, this.servedText);
+    for (let i = 0; i < RUN.lives; i++) {
+      const cup = this.add.rectangle(GAME_W - 260 + i * 34, 30, 22, 28, COLORS.warn).setStrokeStyle(2, 0x000000);
+      this.cups.push(cup);
+      this.hudLayer.push(cup);
+    }
 
-    const center = { x: GAME_W / 2, y: (SLOT_H * CELL * LEVEL_ROWS) / 2 };
-    this.banner = this.add
-      .text(center.x, center.y, '', { fontFamily: 'monospace', fontSize: '28px', color: '#6fd08c', align: 'center' })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(20)
-      .setVisible(false);
-    this.focusHint = this.add
-      .text(center.x, center.y, 'click to play', {
-        fontFamily: 'monospace',
-        fontSize: '20px',
-        color: '#ffffff',
-        backgroundColor: '#000000aa',
-        padding: { x: 12, y: 8 },
-      })
-      .setOrigin(0.5)
-      .setScrollFactor(0)
-      .setDepth(30);
+    // Strip where the coworker walks toward the staff door as the shift runs out.
+    const stripY = 74;
+    this.hudLayer.push(
+      this.add.rectangle(0, stripY - 2, GAME_W, 2, COLORS.panelLight).setOrigin(0, 0.5),
+      this.add.rectangle(70, stripY - 12, 26, 26, COLORS.panelLight).setStrokeStyle(2, 0x000000),
+      this.add.text(70, stripY - 12, 'STAFF', { fontFamily: MONO, fontSize: '8px', color: COLORS.text }).setOrigin(0.5),
+    );
+    this.coworker = this.add.container(GAME_W - 40, stripY - 14, [
+      this.add.rectangle(0, 2, 12, 18, COLORS.accent),
+      this.add.circle(0, -11, 6, 0xd9b38c),
+      this.add.text(0, 19, COWORKER, { fontFamily: MONO, fontSize: '10px', color: COLORS.text }).setOrigin(0.5),
+    ]);
+    this.hudLayer.push(this.coworker);
+
+    this.instruction = this.add.text(GAME_W / 2, GAME_H / 2, '', { fontFamily: BIG, fontSize: '110px', color: COLORS.text }).setOrigin(0.5).setDepth(20);
+    this.instruction.setStroke('#000000', 10);
+    this.hint = this.add.text(GAME_W / 2, GAME_H / 2 + 70, '', { fontFamily: MONO, fontSize: '20px', color: COLORS.dim }).setOrigin(0.5).setDepth(20);
+    this.timerBar = this.add.rectangle(20, GAME_H - FOOTER_H / 2, GAME_W - 40, 14, COLORS.good).setOrigin(0, 0.5).setDepth(20);
+    this.stamp = this.add.text(GAME_W / 2, GAME_H / 2, '', { fontFamily: BIG, fontSize: '120px', color: '#ffffff' }).setOrigin(0.5).setDepth(30);
+    this.stamp.setStroke('#000000', 12);
+    for (const obj of [this.instruction, this.hint, this.timerBar, this.stamp]) (obj as Phaser.GameObjects.Text).setVisible(false);
   }
+
+  private updateHud(): void {
+    const t = Math.ceil(this.run.timeLeft);
+    this.clockText.setText(
+      t > 0 ? `SHIFT CHANGE IN ${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}` : 'SHIFT CHANGE! finish this one',
+    );
+    this.clockText.setColor(t <= 10 ? hex(COLORS.bad) : COLORS.text);
+    this.servedText.setText(`SERVED ${this.run.wins}`);
+    this.cups.forEach((cup, i) => cup.setFillStyle(i < this.run.lives ? COLORS.warn : COLORS.panelLight));
+    const progress = 1 - this.run.timeLeft / RUN.shiftSeconds;
+    this.coworker.setX(GAME_W - 40 - progress * (GAME_W - 40 - 70));
+  }
+
+  private showStamp(text: string, color: number): void {
+    this.sfx.stamp();
+    this.stamp.setText(text).setColor(hex(color)).setVisible(true).setScale(2.4).setAngle(-12).setAlpha(1);
+    this.tweens.add({ targets: this.stamp, scale: 1, duration: 160, ease: 'Cubic.In' });
+  }
+
+  private setHudVisible(visible: boolean): void {
+    for (const obj of this.hudLayer) (obj as Phaser.GameObjects.Components.Visible & Phaser.GameObjects.GameObject).setVisible(visible);
+  }
+
+  private destroyAll(list: Phaser.GameObjects.GameObject[]): void {
+    for (const obj of list.splice(0)) obj.destroy();
+  }
+}
+
+function hex(color: number): string {
+  return `#${color.toString(16).padStart(6, '0')}`;
 }

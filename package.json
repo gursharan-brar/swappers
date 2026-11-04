@@ -2,7 +2,7 @@
   "name": "swappers",
   "private": true,
   "version": "0.1.0",
-  "description": "GitHub Game Off 2026 entry (theme: SHIFT). A platformer where the level is made of text.",
+  "description": "GitHub Game Off 2026 entry (theme: SHIFT). One gas-bar shift, 90 seconds until shift change.",
   "type": "module",
   "engines": {
     "node": ">=22"
